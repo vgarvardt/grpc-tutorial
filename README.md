@@ -9,6 +9,7 @@ Index:
 - [1. Hello world go application](#1-hello-world-go-application)
 - [2. gRPC service definition and basic Makefile](#2-grpc-service-definition-and-basic-makefile)
 - [3. Implement EchoService Server](#3-implement-echoservice-server)
+- [4. Wrap application into simple command-based approach](#4-wrap-application-into-simple-command-based-approach)
 
 ## 1. Hello world go application
 
@@ -119,3 +120,109 @@ func (s *echoServiceServer) Reflect(ctx context.Context, in *rpc.SaySomething) (
 It starts with struct type for a service. Since it is going to be interface implementation it does not make sense to expose
 the type, it should be built using the builder function. The implementation of the only method is simple - get the message
 from the input and current timestamp.
+
+## 4. Wrap application into simple command-based approach
+
+Applications are going to be organised as monorepo so it also can be build as a single application working in different modes.
+I'll use `github.com/spf13/cobra` to organise it.
+
+First of all I'm going to create a root command that will be used to attach different commands/modes to it.
+Start with `touch app/root.go` and add the following content to it:
+
+```go
+package app
+
+import (
+	"github.com/spf13/cobra"
+)
+
+// NewRootCmd creates a new instance of the root command
+func NewRootCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "grpc-tutorial",
+		Short: "gRPC Tutorial is the set of simple apps to play with gRPC in go",
+	}
+
+	return cmd
+}
+
+```
+
+Do nt forget to run `go mod vendor` to let go modules add missing package to a project.
+
+Now we can add the first command - let it be `version` as it does not require any logic. Do the `touch app/version.go`
+and add the following content to it:
+
+```go
+package app
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/spf13/cobra"
+)
+
+var version = "0.0.0-dev"
+
+// NewVersionCmd creates a new version command
+func NewVersionCmd(ctx context.Context) *cobra.Command {
+	return &cobra.Command{
+		Use:     "version",
+		Short:   "Print the version information",
+		Aliases: []string{"v"},
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("grpc-tutorial %s\n", version)
+		},
+	}
+}
+```
+
+Variable `version` is declared as private and has predefined default value. It allows to define real application version
+in compile-time in CI.
+
+Now it is time to register the first command in the root, so the root command builder function will look like this:
+
+```go
+// NewRootCmd creates a new instance of the root command
+func NewRootCmd() *cobra.Command {
+	ctx := context.Background()
+
+	cmd := &cobra.Command{
+		Use:   "grpc-tutorial",
+		Short: "gRPC Tutorial is the set of simple apps to play with gRPC in go",
+	}
+
+	cmd.AddCommand(NewVersionCmd(ctx))
+
+	return cmd
+}
+```
+
+And now it is time to use the root command as an entry point for the application.
+To do this we need to change the `main()` function, so the full contents of the `main.go` will be:
+
+```go
+package main
+
+import (
+	"log"
+
+	"github.com/vgarvardt/grpc-tutorial/app"
+)
+
+func main() {
+	rootCmd := app.NewRootCmd()
+
+	if err := rootCmd.Execute(); err != nil {
+		log.Fatalf("Failed to run command: %v\n", err)
+	}
+}
+```
+
+And finally we can test the application
+
+```bash
+$ go run main.go version
+grpc-tutorial 0.0.0-dev
+```
