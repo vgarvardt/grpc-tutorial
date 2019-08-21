@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package rpc;
+
+import "google/protobuf/timestamp.proto";
+
+message SaySomething {
+    string Message = 1;
+}
+
+message HearBack {
+    string Message = 1;
+    google.protobuf.Timestamp HappenedAt = 2;
+}
+
+service EchoService {
+    rpc Reflect (SaySomething) returns (HearBack) {
+    }
+}
