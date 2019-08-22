@@ -23,15 +23,14 @@ func NewServerCmd(ctx context.Context, version string) *cobra.Command {
 		Use:   "echo-server",
 		Short: "Starts Echo gRPC Server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunServer(ctx, version)
+			return runServer(ctx, version)
 		},
 	}
 
 	return cmd
 }
 
-// RunServer is the run command to start echo-server
-func RunServer(ctx context.Context, version string) error {
+func runServer(ctx context.Context, version string) error {
 	log.Printf("Starting echo-server v%s", version)
 
 	// create new gRPC Server instance

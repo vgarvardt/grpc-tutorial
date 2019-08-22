@@ -12,6 +12,7 @@ Index:
 - [4. Wrap application into simple command-based approach](#4-wrap-application-into-simple-command-based-approach)
 - [5. Create simple gRPC Server, finally!](#5-create-simple-grpc-server-finally)
   - [gRPC Server testing tools](#grpc-server-testing-tools)
+- [6. Create simple gRPC client](#6-create-simple-grpc-client)
 
 ## 1. Hello world go application
 
@@ -352,3 +353,105 @@ $ grpcurl -plaintext -d '{"Message": "Hello from gRPCurl"}' localhost:5000 rpc.E
 One parameter worth mentioning here is the `-plaintext` that we have to set in both tools - it enables
 insecure connection mode. I'll cover security part a bit further. For now just keep in mind - Server is running
 in insecure mode and is not ready for production usage.
+
+## 6. Create simple gRPC client
+
+Now that we already have gRPC server up and running we can start building a client that will talk to the server from
+an application. For this purpose I'm going to introduce one more application - `client`.
+Do the `mkdir -p app/client && touch app/client/app.go` and add the following contents to it:
+
+```go
+package client
+
+import (
+	"context"
+	"log"
+	"time"
+
+	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
+
+	"github.com/vgarvardt/grpc-tutorial/pkg/rpc"
+)
+
+const echoServerTarget = "localhost:5000"
+
+// NewClientCmd builds new gRPC client command
+func NewClientCmd(ctx context.Context, version string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "client",
+		Short: "Runs gRPC client",
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			log.Printf("Running gRPC client v%s", version)
+			return nil
+		},
+	}
+
+	echoCmd := &cobra.Command{
+		Use:   "echo",
+		Short: "Runs gRPC echo-server client",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runEchoClient(ctx)
+		},
+	}
+
+	cmd.AddCommand(echoCmd)
+
+	return cmd
+}
+
+func runEchoClient(ctx context.Context) error {
+	log.Printf("Connecting to the gRPC Server at %s", echoServerTarget)
+
+	// create dial context (connection) for the client, it will be used bu the client to communicate with the server,
+	// kep in mind that connection object is lazy, that means it will establish real connection only before
+	// the first usage
+	clientConn, err := grpc.DialContext(context.TODO(), echoServerTarget, grpc.WithInsecure())
+	if err != nil {
+		return err
+	}
+
+	// do not forget to close the connection after communication is over
+	defer func() {
+		if err := clientConn.Close(); err != nil {
+			log.Printf("Got an error on closing client connection: %v\n", err)
+		}
+	}()
+
+	// create EchoService client from generated code - all it needs is connection
+	echoClient := rpc.NewEchoServiceClient(clientConn)
+
+	// prepare a message to send to a server - just send current date and time
+	msg := &rpc.SaySomething{Message: time.Now().String()}
+	log.Printf("Sending a message to an Echo Server: %v\n", msg)
+
+	// send the message and get the response
+	response, err := echoClient.Reflect(context.TODO(), msg)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("Got a response from the Echo Server: %v\n", response)
+
+	return nil
+}
+```
+
+Application has two functions - `NewClientCmd` is the command builder. As you can see I'm using nested `client` command
+keeping in mind that this tutorial will include more server examples. The second function has the actual gRPC client logic.
+
+Comments in the code describe what is going on there. The only thing that worth mentioning additionally is
+`grpc.WithInsecure()` parameter passed to a connection context - it has the same effect as `-plaintext` parameter we used
+in the tools before, so it just enables insecure connection mode.
+
+Add a client command to a root one with `cmd.AddCommand(client.NewClientCmd(ctx, version))` and we're ready to test it.
+
+Run the server and run the client in another session - you should get something like this:
+
+```bash
+$ go run main.go client echo
+2019/08/22 11:56:34 Running gRPC client v0.0.0-dev
+2019/08/22 11:56:34 Connecting to the gRPC Server at localhost:5000
+2019/08/22 11:56:34 Sending a message to an Echo Server: Message:"2019-08-22 11:56:34.12164 +0200 CEST m=+0.006463419"
+2019/08/22 11:56:34 Got a response from the Echo Server: Message:"2019-08-22 11:56:34.12164 +0200 CEST m=+0.006463419" HappenedAt:<seconds:1566467794 nanos:128242000 >
+```

@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/vgarvardt/grpc-tutorial/app/client"
 	"github.com/vgarvardt/grpc-tutorial/app/echo"
 )
 
@@ -19,6 +20,7 @@ func NewRootCmd() *cobra.Command {
 
 	cmd.AddCommand(NewVersionCmd(ctx))
 	cmd.AddCommand(echo.NewServerCmd(ctx, version))
+	cmd.AddCommand(client.NewClientCmd(ctx, version))
 
 	return cmd
 }
