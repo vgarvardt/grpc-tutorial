@@ -10,6 +10,8 @@ Index:
 - [2. gRPC service definition and basic Makefile](#2-grpc-service-definition-and-basic-makefile)
 - [3. Implement EchoService Server](#3-implement-echoservice-server)
 - [4. Wrap application into simple command-based approach](#4-wrap-application-into-simple-command-based-approach)
+- [5. Create simple gRPC Server, finally!](#5-create-simple-grpc-server-finally)
+  - [gRPC Server testing tools](#grpc-server-testing-tools)
 
 ## 1. Hello world go application
 
@@ -226,3 +228,127 @@ And finally we can test the application
 $ go run main.go version
 grpc-tutorial 0.0.0-dev
 ```
+
+## 5. Create simple gRPC Server, finally!
+
+All preparations are done, nothing holds us from creating an gRPC Server! Do the `touch app/echo/app.go` and add the
+following contents to it:
+
+```go
+package echo
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net"
+
+	"github.com/pkg/errors"
+	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
+
+	"github.com/vgarvardt/grpc-tutorial/app/echo/internal/service"
+	"github.com/vgarvardt/grpc-tutorial/pkg/rpc"
+)
+
+const tcpPort = 5000
+
+// NewServerCmd builds new echo-server command
+func NewServerCmd(ctx context.Context, version string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "echo-server",
+		Short: "Starts Echo gRPC Server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return RunServer(ctx, version)
+		},
+	}
+
+	return cmd
+}
+
+// RunServer is the run command to start echo-server
+func RunServer(ctx context.Context, version string) error {
+	log.Printf("Starting echo-server v%s", version)
+
+	// create new gRPC Server instance
+	s := grpc.NewServer()
+
+	// create new service server instance
+	srv := service.NewEchoServiceServer()
+
+	// register service in gRPC Server
+	rpc.RegisterEchoServiceServer(s, srv)
+
+	// register server reflection to help tools interact with the server
+	reflection.Register(s)
+
+	// create TCP listener
+	tcpListener, err := net.Listen("tcp", fmt.Sprintf(":%d", tcpPort))
+	if err != nil {
+		return errors.Wrap(err, "could not start TCP listener")
+	}
+
+	log.Printf("Running gRPC server on port %d...\n", tcpPort)
+	if err := s.Serve(tcpListener); err != nil {
+		return errors.Wrap(err, "failed to server gRPC server")
+	}
+
+	return nil
+}
+```
+
+Almost all lines are commented here and should be pretty easy to understand. The only line that can be unclear is
+`reflection.Register(s)` and I'll explain it a bit later in this section.
+
+The command is ready, now need to register it in the root one with `cmd.AddCommand(echo.NewServerCmd(ctx, version))`
+right after the `version` one and gRPC Server is ready for the first test!
+
+```
+$ go run main.go echo-server
+2019/08/21 23:09:24 Starting echo-server v0.0.0-dev
+2019/08/21 23:09:24 Running gRPC server on port 5000...
+```
+
+### gRPC Server testing tools
+
+Now that we have gRPC server up and running it would be nice to test it somehow. For HTTP-based API `Postman` or `curl`
+can be used, but they are useless when it comes to gRPC. Luckily there are more or less similar tools to make gRPC calls.
+I tried two of them:
+- [`grpcui`](https://github.com/fullstorydev/grpcui) - GUI one with web interface
+- [`grpcurl`](https://github.com/fullstorydev/grpcurl) - CLI curl-like one
+
+There are two ways of using these tools - either you need to provide a protobuf definition file so it could get the
+information about the server and types it is going to work with (same as we generated go file out of it), or it can get
+the all the required information from the server in the runtime and this is where gRPC Reflection comes into play,
+the one that we enabled with `reflection.Register(s)`.
+
+Here are examples of using the tools:
+
+```bash
+$ grpcui -plaintext localhost:5000
+gRPC Web UI available at http://127.0.0.1:57917/...
+```
+
+```
+$ grpcurl -plaintext localhost:5000 list
+grpc.reflection.v1alpha.ServerReflection
+rpc.EchoService
+
+$ grpcurl -plaintext localhost:5000 describe rpc.EchoService
+rpc.EchoService is a service:
+service EchoService {
+  rpc Reflect ( .rpc.SaySomething ) returns ( .rpc.HearBack );
+}
+
+$ grpcurl -plaintext -d '{"Message": "Hello from gRPCurl"}' localhost:5000 rpc.EchoService/Reflect
+{
+  "Message": "Hello from gRPCurl",
+  "HappenedAt": "2019-08-22T08:09:02.061941Z"
+}
+
+```
+
+One parameter worth mentioning here is the `-plaintext` that we have to set in both tools - it enables
+insecure connection mode. I'll cover security part a bit further. For now just keep in mind - Server is running
+in insecure mode and is not ready for production usage.

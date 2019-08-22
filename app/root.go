@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"github.com/spf13/cobra"
+
+	"github.com/vgarvardt/grpc-tutorial/app/echo"
 )
 
 // NewRootCmd creates a new instance of the root command
@@ -16,6 +18,7 @@ func NewRootCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(NewVersionCmd(ctx))
+	cmd.AddCommand(echo.NewServerCmd(ctx, version))
 
 	return cmd
 }
