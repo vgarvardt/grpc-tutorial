@@ -17,6 +17,9 @@ const echoServerTarget = "localhost:5000"
 type clientConfig struct {
 	target  string
 	tlsCert string
+
+	dialTimeout    time.Duration
+	requestTimeout time.Duration
 }
 
 // NewClientCmd builds new gRPC client command
@@ -33,6 +36,7 @@ func NewClientCmd(ctx context.Context, version string) *cobra.Command {
 	}
 
 	cmd.PersistentFlags().StringVar(&cfg.tlsCert, "tls-cert", "", "TLS Certificate file path")
+	cmd.PersistentFlags().DurationVar(&cfg.dialTimeout, "dial-timeout", 5*time.Second, "Server dial timeout")
 
 	echoCmd := &cobra.Command{
 		Use:   "echo",
@@ -43,6 +47,7 @@ func NewClientCmd(ctx context.Context, version string) *cobra.Command {
 	}
 
 	echoCmd.PersistentFlags().StringVar(&cfg.target, "target", echoServerTarget, "Server target")
+	echoCmd.PersistentFlags().DurationVar(&cfg.requestTimeout, "request-timeout", 10*time.Second, "Request timeout")
 
 	cmd.AddCommand(echoCmd)
 
@@ -57,11 +62,14 @@ func runEchoClient(ctx context.Context, cfg *clientConfig) error {
 		return err
 	}
 
+	dialCtx, cancel := context.WithTimeout(context.TODO(), cfg.dialTimeout)
+	defer cancel()
+
 	// create dial context (connection) for the client, it will be used bu the client to communicate with the server,
 	// kep in mind that connection object is lazy, that means it will establish real connection only before
 	// the first usage
 	clientConn, err := grpc.DialContext(
-		context.TODO(),
+		dialCtx,
 		cfg.target,
 		grpc.WithTransportCredentials(tlsCredentials),
 	)
@@ -83,8 +91,11 @@ func runEchoClient(ctx context.Context, cfg *clientConfig) error {
 	msg := &rpc.SaySomething{Message: time.Now().String()}
 	log.Printf("Sending a message to an Echo Server: %v\n", msg)
 
+	rqCtx, cancel := context.WithTimeout(context.TODO(), cfg.requestTimeout)
+	defer cancel()
+
 	// send the message and get the response
-	response, err := echoClient.Reflect(context.TODO(), msg)
+	response, err := echoClient.Reflect(rqCtx, msg)
 	if err != nil {
 		return err
 	}

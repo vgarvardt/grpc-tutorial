@@ -14,6 +14,7 @@ Index:
   - [gRPC Server testing tools](#grpc-server-testing-tools)
 - [6. Create simple gRPC client](#6-create-simple-grpc-client)
 - [7. Time to add a pinch of security](#7-time-to-add-a-pinch-of-security)
+- [8. Moving towards production-ready solution - adding timeouts](#8-moving-towards-production-ready-solution---adding-timeouts)
 
 ## 1. Hello world go application
 
@@ -634,3 +635,176 @@ $ go run main.go client echo --tls-cert `pwd`/resources/cert/echo.crt
 **IMPORTANT SECURITY NOTE**: I'm committing all the openssl-generated files for a tutorial purpose,
 but they should not be exposed in production environment. Work with them in the same way as you work with
 other security-sensitive information like DB credentials. 
+
+## 8. Moving towards production-ready solution - adding timeouts 
+
+Time to add more mature solutions and one of them is timeouts. From a client-perspective there are two types of timeouts
+that are interesting for us - connection timeout and method call timeout.
+
+Let's add timeouts as options with default values to the client application:
+
+```go
+type clientConfig struct {
+	target  string
+	tlsCert string
+
+	dialTimeout    time.Duration
+	requestTimeout time.Duration
+}
+
+// NewClientCmd builds new gRPC client command
+func NewClientCmd(ctx context.Context, version string) *cobra.Command {
+	...
+    cmd.PersistentFlags().DurationVar(&cfg.dialTimeout, "dial-timeout", 5*time.Second, "Server dial timeout")
+    ...
+    echoCmd.PersistentFlags().DurationVar(&cfg.requestTimeout, "request-timeout", 10*time.Second, "Request timeout")
+    ....
+}
+```
+
+Timeouts are managed by `context`, so for a connection it looks like:
+
+```go
+    dialCtx, cancel := context.WithTimeout(context.TODO(), cfg.dialTimeout)
+	defer cancel()
+
+	// create dial context (connection) for the client, it will be used bu the client to communicate with the server,
+	// kep in mind that connection object is lazy, that means it will establish real connection only before
+	// the first usage
+	clientConn, err := grpc.DialContext(
+		dialCtx,
+		cfg.target,
+		grpc.WithTransportCredentials(tlsCredentials),
+	)
+	if err != nil {
+		return err
+	}
+```
+
+and for request:
+
+```go
+    rqCtx, cancel := context.WithTimeout(context.TODO(), cfg.requestTimeout)
+	defer cancel()
+
+	// send the message and get the response
+	response, err := echoClient.Reflect(rqCtx, msg)
+	if err != nil {
+		return err
+	}
+```
+
+The only problem that we have now is the fact that echo server is running locally and real request time is measured
+in nanoseconds. But we can artificially slow down our server by adding delay into the method. Let's do this! =)
+
+```go
+type serverConfig struct {
+	port    int
+	tlsCert string
+	tlsKey  string
+
+	requestMaxDelay time.Duration
+}
+
+// NewServerCmd builds new echo-server command
+func NewServerCmd(ctx context.Context, version string) *cobra.Command {
+    cfg := new(serverConfig)
+
+	cmd := &cobra.Command{
+		Use:   "echo-server",
+		Short: "Starts Echo gRPC Server",
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			// initialise random generator as we may need some randomness
+			rand.Seed(time.Now().UnixNano())
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runServer(ctx, version, cfg)
+		},
+	}
+	...
+    cmd.PersistentFlags().DurationVar(&cfg.requestMaxDelay, "request-max-delay", 0, "Artificial random delay that is added to every request call")
+    ...
+}
+
+func runServer(ctx context.Context, version string, cfg *serverConfig) error {
+	...
+    // create new service server instance
+    srv := service.NewEchoServiceServer(cfg.requestMaxDelay)
+    ...
+}
+```
+
+Please note that I added `PreRunE` callback to the command that seeds random generator for further usage.
+
+And now let's modify the server to slow down randomly:
+
+```go
+type echoServiceServer struct {
+	requestMaxDelay time.Duration
+}
+
+// NewEchoServiceServer builds and returns is rpc.EchoServiceServer implementation
+func NewEchoServiceServer(requestMaxDelay time.Duration) *echoServiceServer {
+	return &echoServiceServer{requestMaxDelay}
+}
+
+// Reflect is the rpc.EchoServiceServer implementation
+func (s *echoServiceServer) Reflect(ctx context.Context, in *rpc.SaySomething) (*rpc.HearBack, error) {
+	if s.requestMaxDelay > 0 {
+		delay := time.Duration(rand.Int63n(int64(s.requestMaxDelay)))
+		log.Printf("Adding artificial delay to a method call: %s", delay.String())
+
+		time.Sleep(delay)
+	}
+
+	return &rpc.HearBack{
+		Message:    in.Message,
+		HappenedAt: ptypes.TimestampNow(),
+	}, nil
+}
+
+```
+
+And now we can run the server to check if the timeout really works - the first request takes less time than a timeout,
+the second one fails.
+
+Server logs output:
+
+```bash
+$ go run main.go echo-server --tls-cert `pwd`/resources/cert/echo.crt --tls-key `pwd`/resources/cert/echo.key --request-max-delay 5s
+2019/08/22 15:13:40 Starting echo-server v0.0.0-dev
+2019/08/22 15:13:40 Running gRPC server on port 5000...
+2019/08/22 15:13:51 Adding artificial delay to a method call: 930.524666ms
+2019/08/22 15:15:14 Adding artificial delay to a method call: 4.884658024s
+```
+
+Client logs output:
+
+```bash
+$ go run main.go client echo --tls-cert `pwd`/resources/cert/echo.crt --request-timeout 2s
+2019/08/22 15:13:51 Running gRPC client v0.0.0-dev
+2019/08/22 15:13:51 Connecting to the gRPC Server at localhost:5000
+2019/08/22 15:13:51 Sending a message to an Echo Server: Message:"2019-08-22 15:13:51.629538 +0200 CEST m=+0.007633975"
+2019/08/22 15:13:52 Got a response from the Echo Server: Message:"2019-08-22 15:13:51.629538 +0200 CEST m=+0.007633975" HappenedAt:<seconds:1566479632 nanos:572179000 >
+
+$ go run main.go client echo --tls-cert `pwd`/resources/cert/echo.crt --request-timeout 2s
+2019/08/22 15:15:14 Running gRPC client v0.0.0-dev
+2019/08/22 15:15:14 Connecting to the gRPC Server at localhost:5000
+2019/08/22 15:15:14 Sending a message to an Echo Server: Message:"2019-08-22 15:15:14.791099 +0200 CEST m=+0.007889743"
+Error: rpc error: code = DeadlineExceeded desc = context deadline exceeded
+Usage:
+  grpc-tutorial client echo [flags]
+
+Flags:
+  -h, --help                       help for echo
+      --request-timeout duration   Request timeout (default 10s)
+      --target string              Server target (default "localhost:5000")
+
+Global Flags:
+      --dial-timeout duration   Server dial timeout (default 5s)
+      --tls-cert string         TLS Certificate file path
+
+2019/08/22 15:15:16 Failed to run command: rpc error: code = DeadlineExceeded desc = context deadline exceeded
+exit status 1
+```
