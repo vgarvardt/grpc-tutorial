@@ -7,14 +7,22 @@ import (
 
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	"github.com/vgarvardt/grpc-tutorial/pkg/rpc"
 )
 
 const echoServerTarget = "localhost:5000"
 
+type clientConfig struct {
+	target  string
+	tlsCert string
+}
+
 // NewClientCmd builds new gRPC client command
 func NewClientCmd(ctx context.Context, version string) *cobra.Command {
+	cfg := new(clientConfig)
+
 	cmd := &cobra.Command{
 		Use:   "client",
 		Short: "Runs gRPC client",
@@ -24,26 +32,39 @@ func NewClientCmd(ctx context.Context, version string) *cobra.Command {
 		},
 	}
 
+	cmd.PersistentFlags().StringVar(&cfg.tlsCert, "tls-cert", "", "TLS Certificate file path")
+
 	echoCmd := &cobra.Command{
 		Use:   "echo",
 		Short: "Runs gRPC echo-server client",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runEchoClient(ctx)
+			return runEchoClient(ctx, cfg)
 		},
 	}
+
+	echoCmd.PersistentFlags().StringVar(&cfg.target, "target", echoServerTarget, "Server target")
 
 	cmd.AddCommand(echoCmd)
 
 	return cmd
 }
 
-func runEchoClient(ctx context.Context) error {
-	log.Printf("Connecting to the gRPC Server at %s", echoServerTarget)
+func runEchoClient(ctx context.Context, cfg *clientConfig) error {
+	log.Printf("Connecting to the gRPC Server at %s", cfg.target)
+
+	tlsCredentials, err := credentials.NewClientTLSFromFile(cfg.tlsCert, "")
+	if err != nil {
+		return err
+	}
 
 	// create dial context (connection) for the client, it will be used bu the client to communicate with the server,
 	// kep in mind that connection object is lazy, that means it will establish real connection only before
 	// the first usage
-	clientConn, err := grpc.DialContext(context.TODO(), echoServerTarget, grpc.WithInsecure())
+	clientConn, err := grpc.DialContext(
+		context.TODO(),
+		cfg.target,
+		grpc.WithTransportCredentials(tlsCredentials),
+	)
 	if err != nil {
 		return err
 	}

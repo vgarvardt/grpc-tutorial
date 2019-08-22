@@ -13,6 +13,7 @@ Index:
 - [5. Create simple gRPC Server, finally!](#5-create-simple-grpc-server-finally)
   - [gRPC Server testing tools](#grpc-server-testing-tools)
 - [6. Create simple gRPC client](#6-create-simple-grpc-client)
+- [7. Time to add a pinch of security](#7-time-to-add-a-pinch-of-security)
 
 ## 1. Hello world go application
 
@@ -455,3 +456,181 @@ $ go run main.go client echo
 2019/08/22 11:56:34 Sending a message to an Echo Server: Message:"2019-08-22 11:56:34.12164 +0200 CEST m=+0.006463419"
 2019/08/22 11:56:34 Got a response from the Echo Server: Message:"2019-08-22 11:56:34.12164 +0200 CEST m=+0.006463419" HappenedAt:<seconds:1566467794 nanos:128242000 >
 ```
+
+## 7. Time to add a pinch of security
+
+Until now communication between server and client was running over an insecure channel.
+Time to add some security to a server. We'll start with TLS.
+
+First we need to generate self-signed SSL-certificate. I'll only list commands that needs to be executed,
+for details - please refer to [official OpenSSL documentation](https://www.openssl.org/docs/manmaster/man1/)
+([genrsa](https://www.openssl.org/docs/manmaster/man1/genrsa.html),
+[req](https://www.openssl.org/docs/manmaster/man1/req.html),
+[x509](https://www.openssl.org/docs/manmaster/man1/x509.html)).
+
+```bash
+$ mkdir -p resources/cert
+$ openssl genrsa -out resources/cert/echo.key 2048
+$ openssl req -new -x509 -sha256 -key resources/cert/echo.key -out resources/cert/echo.crt -days 3650
+$ openssl req -new -sha256 -key resources/cert/echo.key -out resources/cert/echo.csr
+$ openssl x509 -req -sha256 -in resources/cert/echo.csr -signkey resources/cert/echo.key -out resources/cert/echo.crt -days 3650
+``` 
+
+Since we're generating certificate for development `Common Name (eg, fully qualified host name)` should be set to `localhost`.
+
+Not that we have an SSL Key and Certificate we can start securing our server.
+
+To avoid hard-coding Key and Certificate paths I added paths as flags for an application. Now command initialisation looks like this:
+
+```go
+const tcpPort = 5000
+
+type serverConfig struct {
+	port    int
+	tlsCert string
+	tlsKey  string
+}
+
+// NewServerCmd builds new echo-server command
+func NewServerCmd(ctx context.Context, version string) *cobra.Command {
+	cfg := new(serverConfig)
+
+	cmd := &cobra.Command{
+		Use:   "echo-server",
+		Short: "Starts Echo gRPC Server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runServer(ctx, version, cfg)
+		},
+	}
+
+	cmd.PersistentFlags().IntVar(&cfg.port, "port", tcpPort, "Port to run gRPC Sever")
+	cmd.PersistentFlags().StringVar(&cfg.tlsCert, "tls-cert", "", "TLS Certificate file path")
+	cmd.PersistentFlags().StringVar(&cfg.tlsKey, "tls-key", "", "TLS Key file path")
+
+	return cmd
+}
+```
+
+As you can see `port` is also extracted to ann application flags but it has default value so it does not change a lot.
+
+And here are changes made to the server initialisation:
+
+
+```go
+func runServer(ctx context.Context, version string, cfg *serverConfig) error {
+	log.Printf("Starting echo-server v%s", version)
+
+	// create TLS credentials from certificate and key files
+	tlsCredentials, err := credentials.NewServerTLSFromFile(cfg.tlsCert, cfg.tlsKey)
+	if err != nil {
+		return err
+	}
+
+	opts := []grpc.ServerOption{
+		grpc.Creds(tlsCredentials),
+	}
+
+	// create new gRPC Server instance
+	s := grpc.NewServer(opts...)
+
+    ...
+
+    return nil
+```
+
+As you can see there is a small piece of code added before the server initialisation - reading a Certificate
+and a Key from files into TLS credentials and setting these credentials as a server options.
+
+Now you can run the server using the following command:
+
+```bash
+$ go run main.go echo-server --tls-cert `pwd`/resources/cert/echo.crt --tls-key `pwd`/resources/cert/echo.key
+2019/08/22 12:35:51 Starting echo-server v0.0.0-dev
+2019/08/22 12:35:51 Running gRPC server on port 5000...
+```
+
+Time to add TLS connection support for a client.
+
+The changes to a command builder are very similar to the changes made for server but a client requires only a Certificate:
+
+```go
+const echoServerTarget = "localhost:5000"
+
+type clientConfig struct {
+	target  string
+	tlsCert string
+}
+
+// NewClientCmd builds new gRPC client command
+func NewClientCmd(ctx context.Context, version string) *cobra.Command {
+	cfg := new(clientConfig)
+
+	cmd := &cobra.Command{
+		Use:   "client",
+		Short: "Runs gRPC client",
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			log.Printf("Running gRPC client v%s", version)
+			return nil
+		},
+	}
+
+	cmd.PersistentFlags().StringVar(&cfg.tlsCert, "tls-cert", "", "TLS Certificate file path")
+
+	echoCmd := &cobra.Command{
+		Use:   "echo",
+		Short: "Runs gRPC echo-server client",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runEchoClient(ctx, cfg)
+		},
+	}
+
+	echoCmd.PersistentFlags().StringVar(&cfg.target, "target", echoServerTarget, "Server target")
+
+	cmd.AddCommand(echoCmd)
+
+	return cmd
+}
+```
+
+Now that we have a way to provide a Certificate to a client we should add it to a connection:
+
+```go
+func runEchoClient(ctx context.Context, cfg *clientConfig) error {
+	log.Printf("Connecting to the gRPC Server at %s", cfg.target)
+
+	tlsCredentials, err := credentials.NewClientTLSFromFile(cfg.tlsCert, "")
+	if err != nil {
+		return err
+	}
+
+	// create dial context (connection) for the client, it will be used bu the client to communicate with the server,
+	// kep in mind that connection object is lazy, that means it will establish real connection only before
+	// the first usage
+	clientConn, err := grpc.DialContext(
+		context.TODO(),
+		cfg.target,
+		grpc.WithTransportCredentials(tlsCredentials),
+	)
+	if err != nil {
+		return err
+	}
+
+    ...
+
+    return nil
+}
+```
+
+Now you can run the client using the following command:
+
+```bash
+$ go run main.go client echo --tls-cert `pwd`/resources/cert/echo.crt
+2019/08/22 12:36:04 Running gRPC client v0.0.0-dev
+2019/08/22 12:36:04 Connecting to the gRPC Server at localhost:5000
+2019/08/22 12:36:04 Sending a message to an Echo Server: Message:"2019-08-22 12:36:04.574518 +0200 CEST m=+0.007852211"
+2019/08/22 12:36:04 Got a response from the Echo Server: Message:"2019-08-22 12:36:04.574518 +0200 CEST m=+0.007852211" HappenedAt:<seconds:1566470164 nanos:586764000 >
+```
+
+**IMPORTANT SECURITY NOTE**: I'm committing all the openssl-generated files for a tutorial purpose,
+but they should not be exposed in production environment. Work with them in the same way as you work with
+other security-sensitive information like DB credentials. 
